@@ -50,6 +50,7 @@
   #banner.show { opacity: 1; }
   #banner small { display: block; font-size: 18px; letter-spacing: 1px; text-align: center; color: #cfe8b0; }
   #hurt { position: absolute; inset: 0; box-shadow: inset 0 0 160px 40px rgba(200, 0, 0, 0.8); opacity: 0; }
+  #heal { position: absolute; inset: 0; box-shadow: inset 0 0 140px 30px rgba(80, 255, 120, 0.6); opacity: 0; }
 </style>
 </head>
 <body>
@@ -58,16 +59,18 @@
   <p id="subtitle">Click to play</p>
   <p id="controls-hint">WASD move · Mouse look · Space jump · Shift sprint · Esc pause</p>
   <p>Left click shoot (hold for auto) · R reload · M mute</p>
+  <p>1 rifle · 2 flamethrower (or mouse wheel) · Grab dropped medipacks and fuel cans</p>
 </div>
 <div id="hud">
   <div id="hurt"></div>
+  <div id="heal"></div>
   <div id="crosshair"></div>
   <div id="ammo">30 / 30</div>
   <div id="stats">WAVE <span id="wave">1</span><br>SCORE <span id="score">0</span><br>FROGS LEFT <span id="left">0</span></div>
   <div id="health"><div id="health-label">HEALTH <span id="hp">100</span></div>
     <div id="health-bar"><div id="health-fill"></div></div></div>
   <div id="banner"></div>
-  <div id="hint">Mouse lock isn't available here: drag the mouse to look, hold the left button to shoot</div>
+  <div id="hint"></div>
 </div>
 
 <script type="importmap">
@@ -288,6 +291,41 @@ const sfx = (() => {
       tone(t, 0.5, 0.2 * s.vol, s.pan, 'square', 12, 6, 0.01);
       noise(t, 0.25, 0.5 * s.vol, s.pan, 'lowpass', 1200, 200);
     }),
+    // Continuous roar while the flamethrower fires: looped noise through a lowpass, faded in/out
+    flame(on) {
+      if (!ctx) return;
+      on = on && !muted;
+      if (on && !this._flame) {
+        const t = ctx.currentTime;
+        const src = ctx.createBufferSource();
+        src.buffer = noiseBuf; src.loop = true;
+        const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 900;
+        const g = ctx.createGain();
+        g.gain.setValueAtTime(0.0001, t);
+        g.gain.exponentialRampToValueAtTime(0.45, t + 0.08);
+        src.connect(lp).connect(g).connect(master);
+        src.start();
+        tone(t, 0.12, 0.3, 0, 'sine', 120, 60); // ignition whoomph
+        this._flame = { src, g };
+      } else if (!on && this._flame) {
+        const { src, g } = this._flame, t = ctx.currentTime;
+        g.gain.cancelScheduledValues(t);
+        g.gain.setValueAtTime(g.gain.value, t);
+        g.gain.exponentialRampToValueAtTime(0.0001, t + 0.15);
+        src.stop(t + 0.2);
+        this._flame = null;
+      }
+    },
+    switchWeapon: play(t => {
+      noise(t, 0.03, 0.35, 0.3, 'bandpass', 1500);
+      noise(t + 0.12, 0.04, 0.35, 0.3, 'bandpass', 2400);
+    }),
+    empty: play(t => noise(t, 0.03, 0.4, 0, 'highpass', 3500)),
+    pickup: play(t => {
+      // Bright rising chime
+      tone(t, 0.12, 0.25, 0, 'triangle', 660);
+      tone(t + 0.08, 0.2, 0.25, 0, 'triangle', 990);
+    }),
     spit: play((t, pos) => {
       // Wet "ptoo": rising filtered noise + short pop
       const s = spatial(pos);
@@ -345,6 +383,37 @@ const flashLight = new THREE.PointLight(0xffd070, 0, 8);
 flashLight.position.copy(flash.position);
 gun.add(flashLight);
 
+// ---------- Flamethrower model ----------
+const flamer = new THREE.Group();
+{
+  const red   = new THREE.MeshStandardMaterial({ color: 0xa3261c, roughness: 0.4, metalness: 0.4 });
+  const steel = new THREE.MeshStandardMaterial({ color: 0x55585a, roughness: 0.35, metalness: 0.8 });
+  const tank = new THREE.Mesh(new THREE.CylinderGeometry(0.075, 0.075, 0.38, 14), red);
+  tank.rotation.x = Math.PI / 2; tank.position.set(0, -0.06, 0.02);
+  const cap = new THREE.Mesh(new THREE.SphereGeometry(0.075, 12, 8), red);
+  cap.position.set(0, -0.06, 0.21);
+  const pipe = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.04, 0.5, 10), steel);
+  pipe.rotation.x = Math.PI / 2; pipe.position.set(0, 0.05, -0.3);
+  const nozzleTip = new THREE.Mesh(new THREE.CylinderGeometry(0.045, 0.03, 0.08, 10), steel);
+  nozzleTip.rotation.x = Math.PI / 2; nozzleTip.position.set(0, 0.05, -0.57);
+  const handle = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.16, 0.07), gunGrip);
+  handle.position.set(0, -0.05, -0.28); handle.rotation.x = 0.3;
+  const hose = new THREE.Mesh(new THREE.TorusGeometry(0.09, 0.015, 6, 12, Math.PI), steel);
+  hose.position.set(0, -0.01, -0.12); hose.rotation.y = Math.PI / 2;
+  flamer.add(tank, cap, pipe, nozzleTip, handle, hose);
+}
+// Little blue pilot flame at the nozzle
+const pilot = new THREE.Mesh(new THREE.SphereGeometry(0.022, 8, 6),
+  new THREE.MeshBasicMaterial({ color: 0x66aaff, transparent: true, opacity: 0.85 }));
+pilot.position.set(0, 0.05, -0.63);
+flamer.add(pilot);
+const flameLight = new THREE.PointLight(0xff8a30, 0, 12);
+flameLight.position.set(0, 0.05, -1.2);
+flamer.add(flameLight);
+flamer.position.copy(GUN_REST);
+flamer.visible = false;
+camera.add(flamer);
+
 // ---------- Shooting ----------
 const MAG_SIZE = 30, FIRE_INTERVAL = 0.1, RELOAD_TIME = 1.4, DAMAGE = 25, RANGE = 100;
 let ammo = MAG_SIZE, fireCooldown = 0, reloadTimer = 0, flashTimer = 0, recoil = 0;
@@ -366,7 +435,29 @@ shootables.push(ground);
 addEventListener('mousedown', e => { if (e.button === 0 && controls.isLocked) mouseDown = true; }); // fallback mode sets mouseDown itself
 addEventListener('mouseup',   e => { if (e.button === 0) mouseDown = false; });
 controls.addEventListener('unlock', () => { mouseDown = false; });
-addEventListener('keydown', e => { if (e.code === 'KeyR') startReload(); });
+addEventListener('keydown', e => { if (e.code === 'KeyR' && weapon === 'rifle') startReload(); });
+
+// ---------- Weapons: 1 = rifle, 2 = flamethrower (or mouse wheel) ----------
+const FUEL_MAX = 100, FUEL_BURN = 18, SWITCH_TIME = 0.25;
+let weapon = 'rifle', switchT = 0, fuel = FUEL_MAX, firingFlame = false, emptyWarned = false;
+
+function setWeapon(w, force = false) {
+  if (w === weapon && !force) return;
+  weapon = w;
+  switchT = force ? 0 : SWITCH_TIME;
+  reloadTimer = 0; // switching cancels a reload
+  gun.visible = w === 'rifle';
+  flamer.visible = w === 'flame';
+  if (!force) sfx.switchWeapon();
+  updateAmmo();
+}
+addEventListener('keydown', e => {
+  if (e.code === 'Digit1') setWeapon('rifle');
+  if (e.code === 'Digit2') setWeapon('flame');
+});
+addEventListener('wheel', e => {
+  if (isPlaying()) setWeapon(weapon === 'rifle' ? 'flame' : 'rifle');
+}, { passive: true });
 
 function startReload() {
   if (reloadTimer > 0 || ammo === MAG_SIZE) return;
@@ -376,6 +467,11 @@ function startReload() {
 }
 
 function updateAmmo() {
+  if (weapon === 'flame') {
+    ammoEl.textContent = `FUEL ${Math.ceil(fuel)}%`;
+    ammoEl.classList.toggle('low', fuel <= 20);
+    return;
+  }
   ammoEl.textContent = reloadTimer > 0 ? 'RELOADING…' : `${ammo} / ${MAG_SIZE}`;
   ammoEl.classList.toggle('low', reloadTimer <= 0 && ammo <= 5);
 }
@@ -494,14 +590,115 @@ function shoot() {
   if (ammo === 0) startReload();
 }
 
+// ---------- Flames: additive glowing sprites ----------
+const flameTex = (() => {
+  const c = document.createElement('canvas'); c.width = c.height = 64;
+  const g = c.getContext('2d');
+  const grad = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+  grad.addColorStop(0, 'rgba(255,255,255,1)');
+  grad.addColorStop(0.4, 'rgba(255,255,255,0.6)');
+  grad.addColorStop(1, 'rgba(255,255,255,0)');
+  g.fillStyle = grad; g.fillRect(0, 0, 64, 64);
+  return new THREE.CanvasTexture(c);
+})();
+const flames = [];
+const MAX_FLAMES = 350, FLAME_RATE = 110;
+const FLAME_HOT = new THREE.Color(0xffe27a), FLAME_MID = new THREE.Color(0xff6a1a), FLAME_COLD = new THREE.Color(0x5a1408);
+let flameEmitAcc = 0;
+
+function spawnFlame(pos, vel, life, size0, size1) {
+  if (flames.length >= MAX_FLAMES) return;
+  const s = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: flameTex, color: FLAME_HOT, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending }));
+  s.position.copy(pos);
+  s.material.rotation = Math.random() * Math.PI * 2;
+  scene.add(s);
+  flames.push({ s, vel, life, age: 0, size0, size1 });
+}
+
+const nozzleWorld = new THREE.Vector3(), aimDir = new THREE.Vector3();
+function emitFlames(dt) {
+  flameEmitAcc += dt * FLAME_RATE;
+  pilot.getWorldPosition(nozzleWorld);
+  camera.getWorldDirection(aimDir);
+  while (flameEmitAcc >= 1) {
+    flameEmitAcc--;
+    const v = aimDir.clone().add(new THREE.Vector3((Math.random() - 0.5) * 0.22, (Math.random() - 0.5) * 0.22, (Math.random() - 0.5) * 0.22))
+      .normalize().multiplyScalar(11 + Math.random() * 3);
+    spawnFlame(nozzleWorld.clone().addScaledVector(v, Math.random() * 0.01), v, 0.5 + Math.random() * 0.15, 0.12, 1.5);
+  }
+}
+
+function updateFlames(dt) {
+  for (let i = flames.length - 1; i >= 0; i--) {
+    const f = flames[i];
+    f.age += dt;
+    const t = f.age / f.life;
+    if (t >= 1) { scene.remove(f.s); f.s.material.dispose(); flames.splice(i, 1); continue; }
+    f.vel.multiplyScalar(1 - Math.min(1, 1.8 * dt)); // air drag
+    f.vel.y += 3 * dt;                                 // hot air rises
+    f.s.position.addScaledVector(f.vel, dt);
+    if (f.s.position.y < 0.15) f.s.position.y = 0.15;
+    f.s.scale.setScalar(f.size0 + (f.size1 - f.size0) * t);
+    if (t < 0.4) f.s.material.color.lerpColors(FLAME_HOT, FLAME_MID, t / 0.4);
+    else f.s.material.color.lerpColors(FLAME_MID, FLAME_COLD, (t - 0.4) / 0.6);
+    f.s.material.opacity = 0.9 * (1 - t);
+  }
+}
+
+function clearFlames() {
+  for (const f of flames) { scene.remove(f.s); f.s.material.dispose(); }
+  flames.length = 0;
+}
+
+// Cone damage: frogs within range and angle take damage and catch fire
+const FLAME_RANGE = 7, FLAME_COS = Math.cos(THREE.MathUtils.degToRad(22)), FLAME_DPS = 60;
+const BURN_TIME = 2.5, BURN_DPS = 15;
+const toFrog = new THREE.Vector3();
+function flameDamage(dt) {
+  camera.getWorldDirection(aimDir);
+  for (const f of frogs) {
+    if (f.dead) continue;
+    toFrog.copy(f.mesh.position).setY(0.5 * f.type.scale).sub(camera.position);
+    const d = toFrog.length();
+    if (d > FLAME_RANGE + 0.5 * f.type.scale) continue;
+    if (d > 1.5 && toFrog.dot(aimDir) / d < FLAME_COS) continue;
+    f.burn = BURN_TIME;
+    damageFrog(f, FLAME_DPS * dt, null, true);
+    if (f.dead) charFrog(f);
+  }
+}
+
 function updateGun(dt) {
   fireCooldown -= dt;
-  if (reloadTimer > 0) {
-    reloadTimer -= dt;
-    if (reloadTimer <= 0) { ammo = MAG_SIZE; reloadTimer = 0; updateAmmo(); }
-  } else if (mouseDown && fireCooldown <= 0 && ammo > 0) {
-    shoot();
+  switchT = Math.max(0, switchT - dt);
+  firingFlame = false;
+  if (weapon === 'rifle') {
+    if (reloadTimer > 0) {
+      reloadTimer -= dt;
+      if (reloadTimer <= 0) { ammo = MAG_SIZE; reloadTimer = 0; updateAmmo(); }
+    } else if (mouseDown && fireCooldown <= 0 && ammo > 0 && switchT <= 0) {
+      shoot();
+    }
+  } else if (mouseDown && switchT <= 0) {
+    if (fuel > 0) {
+      firingFlame = true;
+      emptyWarned = false;
+      const before = Math.ceil(fuel);
+      fuel = Math.max(0, fuel - FUEL_BURN * dt);
+      if (Math.ceil(fuel) !== before) updateAmmo();
+      emitFlames(dt);
+      flameDamage(dt);
+    } else if (!emptyWarned) {
+      emptyWarned = true;
+      sfx.empty();
+      showHint('Out of fuel: press 1 for the rifle, collect red fuel cans', 3);
+    }
   }
+  sfx.flame(firingFlame);
+  flameLight.intensity = firingFlame ? 4 + Math.random() * 3 : 0;
+  pilot.scale.setScalar(0.8 + Math.random() * 0.4);
+  updateFlames(dt);
 
   flashTimer -= dt;
   flash.visible = flashTimer > 0;
@@ -511,8 +708,11 @@ function updateGun(dt) {
   // Recoil kick + reload dip, eased back to rest
   recoil = Math.max(0, recoil - dt * 12);
   const dip = reloadTimer > 0 ? Math.sin((reloadTimer / RELOAD_TIME) * Math.PI) : 0;
-  gun.position.set(GUN_REST.x, GUN_REST.y - dip * 0.15, GUN_REST.z + recoil * 0.06);
+  const raise = switchT / SWITCH_TIME * 0.3; // new weapon comes up from below
+  gun.position.set(GUN_REST.x, GUN_REST.y - dip * 0.15 - raise, GUN_REST.z + recoil * 0.06);
   gun.rotation.x = recoil * 0.12 - dip * 0.6;
+  const shake = firingFlame ? 0.006 : 0;
+  flamer.position.set(GUN_REST.x + (Math.random() - 0.5) * shake, GUN_REST.y - raise + (Math.random() - 0.5) * shake, GUN_REST.z);
 
   for (let i = impacts.length - 1; i >= 0; i--) {
     const p = impacts[i];
@@ -642,9 +842,20 @@ function spawnFrog(speed = 1, damage = 10, typeKey = 'normal') {
   return frog;
 }
 
-function damageFrog(frog, dmg, hit) {
+// Blackened corpse for frogs killed by fire
+function charFrog(frog) {
+  frog.mesh.userData.skin.color.setHex(0x2a2418);
+  frog.burn = 0;
+}
+
+// fire = true for flame/burn damage: no knockback, no squish sound, no red flash (it glows orange instead)
+function damageFrog(frog, dmg, hit, fire = false) {
   if (frog.dead) return;
   frog.hp -= dmg;
+  if (fire) {
+    if (frog.hp <= 0) killFrog(frog);
+    return;
+  }
   frog.hitFlash = 0.1;
   // Small knockback away from the shot
   const push = hit.point.clone().sub(camera.position).setY(0).normalize().multiplyScalar(0.25 / frog.type.scale);
@@ -658,6 +869,7 @@ function killFrog(frog) {
   frog.dead = true;
   frog.hopT = -1;
   onFrogKilled(frog);
+  maybeDrop(frog);
   sfx.death(frog.mesh.position);
   frog.mesh.position.y = 0;
   shootables.splice(shootables.indexOf(frog.mesh), 1);
@@ -684,9 +896,23 @@ function updateFrogs(dt) {
       continue;
     }
 
-    // Hit flash
+    // Burning: damage over time + flames licking off the body
+    if (f.burn > 0) {
+      f.burn -= dt;
+      damageFrog(f, BURN_DPS * dt, null, true);
+      if (f.dead) { charFrog(f); continue; }
+      if (Math.random() < dt * 30) {
+        const s = f.type.scale;
+        spawnFlame(m.position.clone().add(new THREE.Vector3((Math.random() - 0.5) * s, (0.3 + Math.random() * 0.6) * s, (Math.random() - 0.5) * s)),
+          new THREE.Vector3((Math.random() - 0.5) * 0.4, 1.5 + Math.random(), (Math.random() - 0.5) * 0.4), 0.45, 0.25 * s, 0.6 * s);
+      }
+    }
+
+    // Hit flash (red) or burning glow (flickering orange)
     f.hitFlash -= dt;
-    m.userData.skin.emissive.setHex(f.hitFlash > 0 ? 0xff3333 : 0x000000);
+    if (f.hitFlash > 0) m.userData.skin.emissive.setHex(0xff3333);
+    else if (f.burn > 0) m.userData.skin.emissive.setRGB(0.6 + Math.random() * 0.3, 0.2 + Math.random() * 0.1, 0);
+    else m.userData.skin.emissive.setHex(0x000000);
 
     toPlayer.copy(camera.position).sub(m.position).setY(0);
     const dist = toPlayer.length();
@@ -800,10 +1026,106 @@ function clearSpits() {
   spits.length = 0;
 }
 
+// ---------- Pickups (dropped by killed frogs) ----------
+const PICKUP_LIFE = 20, PICKUP_BLINK = 5, PICKUP_RADIUS = 1.2, MEDI_HEAL = 25, FUEL_REFILL = 35;
+// Drop chance per frog type
+const MEDI_DROP = { normal: 0.08, hopper: 0.08, spitter: 0.10, bull: 0.30 };
+const FUEL_DROP = { normal: 0.10, hopper: 0.10, spitter: 0.12, bull: 0.25 };
+
+function buildFuelCan() {
+  const g = new THREE.Group();
+  const red = new THREE.MeshStandardMaterial({ color: 0xc8261a, roughness: 0.45, metalness: 0.3 });
+  const can = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.5, 0.2), red);
+  can.castShadow = true;
+  const handle = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.05, 0.06), red);
+  handle.position.set(-0.04, 0.3, 0);
+  const spout = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.035, 0.12, 8),
+    new THREE.MeshStandardMaterial({ color: 0xe0c020, roughness: 0.4, metalness: 0.5 }));
+  spout.position.set(0.13, 0.3, 0); spout.rotation.z = -0.5;
+  // Glowing yellow flame symbol on both faces
+  const sym = new THREE.MeshStandardMaterial({ color: 0xffd020, emissive: 0xffa000, emissiveIntensity: 0.8 });
+  for (const s of [-1, 1]) {
+    const d = new THREE.Mesh(new THREE.ConeGeometry(0.07, 0.2, 4), sym);
+    d.position.set(0, 0, s * 0.105); d.scale.z = 0.1;
+    g.add(d);
+  }
+  g.add(can, handle, spout);
+  return g;
+}
+const pickups = [];
+
+function buildMedipack() {
+  const g = new THREE.Group();
+  const box = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.4, 0.45),
+    new THREE.MeshStandardMaterial({ color: 0xf2f2ea, roughness: 0.5 }));
+  box.castShadow = true;
+  g.add(box);
+  // Glowing red cross on the top and both long sides
+  const crossMat = new THREE.MeshStandardMaterial({ color: 0xff2020, emissive: 0xcc0000, emissiveIntensity: 0.8 });
+  const bar = (w, h, d, x, y, z) => { const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), crossMat); m.position.set(x, y, z); g.add(m); };
+  bar(0.36, 0.02, 0.1, 0, 0.21, 0); bar(0.1, 0.02, 0.32, 0, 0.21, 0);       // top
+  for (const s of [-1, 1]) { bar(0.3, 0.08, 0.02, 0, 0, s * 0.235); bar(0.08, 0.26, 0.02, 0, 0, s * 0.235); } // sides
+  return g;
+}
+
+function spawnPickup(kind, x, z) {
+  const lim = ARENA - 2;
+  const mesh = kind === 'fuel' ? buildFuelCan() : buildMedipack();
+  mesh.position.set(THREE.MathUtils.clamp(x, -lim, lim), 0.6, THREE.MathUtils.clamp(z, -lim, lim));
+  scene.add(mesh);
+  pickups.push({ mesh, kind, age: 0, phase: Math.random() * Math.PI * 2 });
+}
+
+function maybeDrop(frog) {
+  const p = frog.mesh.position;
+  const key = Object.keys(FROG_TYPES).find(k => FROG_TYPES[k] === frog.type);
+  // At most one drop per frog
+  if (Math.random() < MEDI_DROP[key]) spawnPickup('medi', p.x, p.z);
+  else if (Math.random() < FUEL_DROP[key]) spawnPickup('fuel', p.x, p.z);
+}
+
+function removePickup(i) {
+  scene.remove(pickups[i].mesh);
+  pickups.splice(i, 1);
+}
+
+function updatePickups(dt) {
+  for (let i = pickups.length - 1; i >= 0; i--) {
+    const p = pickups[i], m = p.mesh;
+    p.age += dt;
+    m.rotation.y += dt * 1.5;
+    m.position.y = 0.6 + Math.sin(p.age * 3 + p.phase) * 0.12;
+    // Blink before disappearing
+    m.visible = p.age < PICKUP_LIFE - PICKUP_BLINK || Math.floor(p.age * 6) % 2 === 0;
+    if (p.age >= PICKUP_LIFE) { removePickup(i); continue; }
+
+    const dx = m.position.x - camera.position.x, dz = m.position.z - camera.position.z;
+    if (Math.hypot(dx, dz) < PICKUP_RADIUS && camera.position.y < EYE + 1.5) {
+      if (p.kind === 'medi' && hp < MAX_HP) {   // at full health it stays on the ground
+        hp = Math.min(MAX_HP, hp + MEDI_HEAL);
+        healFlash = 1;
+        sfx.pickup();
+        updateHud();
+        removePickup(i);
+      } else if (p.kind === 'fuel' && fuel < FUEL_MAX) {
+        fuel = Math.min(FUEL_MAX, fuel + FUEL_REFILL);
+        sfx.pickup();
+        updateAmmo();
+        if (weapon !== 'flame') showHint(`+${FUEL_REFILL}% fuel (press 2 for the flamethrower)`, 2);
+        removePickup(i);
+      }
+    }
+  }
+}
+
+function clearPickups() {
+  while (pickups.length) removePickup(0);
+}
+
 // ---------- Game state: health, score, waves ----------
 const $ = id => document.getElementById(id);
 const MAX_HP = 100, BREAK_TIME = 3, WAVE_HEAL = 20;
-let hp = MAX_HP, score = 0, gameOver = false, started = false, hurt = 0;
+let hp = MAX_HP, score = 0, gameOver = false, started = false, hurt = 0, healFlash = 0;
 const wave = { n: 0, toSpawn: 0, spawnTimer: 0, breakTimer: 0, inBreak: true, speed: 1, damage: 10, interval: 1, maxAlive: 12 };
 
 function aliveFrogs() { return frogs.reduce((c, f) => c + (f.dead ? 0 : 1), 0); }
@@ -815,6 +1137,14 @@ function updateHud() {
   $('wave').textContent = wave.n;
   $('score').textContent = score;
   $('left').textContent = wave.toSpawn + aliveFrogs();
+}
+
+let hintTimer = null;
+function showHint(text, seconds) {
+  $('hint').textContent = text;
+  $('hint').classList.add('show');
+  clearTimeout(hintTimer);
+  hintTimer = setTimeout(() => $('hint').classList.remove('show'), seconds * 1000);
 }
 
 let bannerTimer = 0;
@@ -914,6 +1244,10 @@ function resetGame() {
   frogs.length = 0;
   clearParticles();
   clearSpits();
+  clearPickups();
+  clearFlames();
+  fuel = FUEL_MAX;
+  setWeapon('rifle', true);
   hp = MAX_HP; score = 0; gameOver = false; hurt = 0;
   ammo = MAG_SIZE; reloadTimer = 0; updateAmmo();
   camera.position.set(0, EYE, 0); velocity.set(0, 0, 0);
@@ -938,8 +1272,7 @@ function enterFallback() {
   fallbackPlaying = true;
   overlay.classList.add('hidden');
   $('controls-hint').textContent = 'WASD move · Drag mouse to look · Space jump · Shift sprint · Esc pause';
-  $('hint').classList.add('show');
-  setTimeout(() => $('hint').classList.remove('show'), 6000);
+  showHint("Mouse lock isn't available here: drag the mouse to look, hold the left button to shoot", 6);
 }
 document.addEventListener('pointerlockerror', () => enterFallback());
 
@@ -994,9 +1327,13 @@ const clock = new THREE.Clock();
 function loop() {
   const dt = Math.min(clock.getDelta(), 0.05);
   if (isPlaying() && !gameOver) {
-    updatePlayer(dt); updateGun(dt); updateFrogs(dt); updateWaves(dt); updateSpits(dt); updateParticles(dt);
+    updatePlayer(dt); updateGun(dt); updateFrogs(dt); updateWaves(dt); updateSpits(dt); updateParticles(dt); updatePickups(dt);
     hurt = Math.max(0, hurt - dt * 2.5);
     $('hurt').style.opacity = hurt;
+    healFlash = Math.max(0, healFlash - dt * 2);
+    $('heal').style.opacity = healFlash;
+  } else {
+    sfx.flame(false); // stop the roar when paused / game over
   }
   renderer.render(scene, camera);
   requestAnimationFrame(loop);
