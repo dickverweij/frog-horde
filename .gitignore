@@ -1,0 +1,4 @@
+# Whitelist: only publish the game. Everything else in this folder stays local.
+*
+!index.html
+!.gitignore
