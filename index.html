@@ -1278,8 +1278,15 @@ document.addEventListener('pointerlockerror', () => enterFallback());
 
 function requestLock() {
   try {
-    const p = document.body.requestPointerLock();
-    if (p && p.catch) p.catch(() => enterFallback());
+    // unadjustedMovement: raw mouse input without the OS mouse acceleration (Chrome/Edge/Teams).
+    const p = document.body.requestPointerLock({ unadjustedMovement: true });
+    if (p && p.catch) p.catch(err => {
+      if (err && err.name === 'NotSupportedError') {
+        // Platform can't deliver raw input: fall back to a normal (accelerated) lock
+        const p2 = document.body.requestPointerLock();
+        if (p2 && p2.catch) p2.catch(() => enterFallback());
+      } else enterFallback();
+    });
   } catch { enterFallback(); }
 }
 
